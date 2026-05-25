@@ -17,6 +17,22 @@ All notable changes to this project are documented in this file. The format is b
 
 ---
 
+## [1.1.2] - 2026-05-25
+
+Two follow-ups to 1.1.1: a server-pack import bug that picked the wrong Minecraft version, and a modded-client routing UX fix that turns a confusing "Outdated client" kick into a clear explanation. Safe drop-in upgrade.
+
+### Fixed
+
+- **Server-pack import reads `manifest.json` instead of guessing from JAR filenames.** ServerPackCreator-generated packs (the most common CurseForge "Server Files" download today) ship a `manifest.json` at the ZIP root with authoritative `minecraftVersion` / `modloader` / `modloaderVersion` fields. `ServerPackInstaller.detectFromServerPack()` previously skipped the manifest entirely and inferred the modloader version from the bundled installer-JAR filename (e.g. `neoforge-X-installer.jar`) plus heuristic regex over `run.sh` / `startserver.sh`. When the pack carried an older installer JAR for tool-compat reasons but was actually built for a newer MC version (concretely: a pack imported as `NeoForge 20.2.93 / MC 1.20.2` when the manifest said `NeoForge 21.1.230 / MC 1.21.1`), Nimbus would download the wrong NeoForge installer, scaffold a 1.20.2 service tree, and the mods would fail to load against the mismatched API. The manifest is now consulted first; the JAR-filename / script-regex paths remain as fallback for legacy packs that have no manifest.
+- **Modded clients with no matching modded server now get a clear kick instead of a misleading "Outdated client" Vanilla-lobby error.** When a Forge/NeoForge client connects and no modded group matches its protocol + connection type, the Bridge previously fell back to the regular lobby finder. The lobby is a Paper/Velocity-Vanilla server, so the FML-handshake-marked connection was kicked by Velocity itself with a generic version-mismatch — operators thought the lobby version was wrong, when really the modded routing had silently failed. The Bridge now disconnects the player with `"No compatible modded server for your client"` plus the client's connection type/protocol and the list of available modded groups (name + software + MC version), so players immediately see which client they need.
+
+### Notes
+
+- No API changes. Dashboard `0.11.0-beta.3` remains compatible.
+- The manifest.json reader covers the ServerPackCreator format (`{ "minecraftVersion": "…", "modloader": "…", "modloaderVersion": "…" }`). The classic CurseForge client-side `minecraft-instance.json` and Modrinth `.mrpack/modrinth.index.json` are unchanged — they use the existing `ModpackInstaller.parseIndex()` / `getInfo()` path.
+
+---
+
 ## [1.1.1] - 2026-05-25
 
 Bugfix release focused on the modpack-upload pipeline (Dashboard → Controller) and post-mortem crash diagnostics. No new features; safe drop-in upgrade from 1.1.0.

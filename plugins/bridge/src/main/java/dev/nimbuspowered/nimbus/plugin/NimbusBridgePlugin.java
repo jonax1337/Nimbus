@@ -545,8 +545,14 @@ public class NimbusBridgePlugin {
                         modded.get().getServerInfo().getName());
                     return;
                 }
-                logger.info("No matching modded group for {} client {} (protocol {}, {} mods), falling back to lobby",
+                // No matching modded server. Falling back to a Vanilla lobby would
+                // immediately fail with a confusing "Outdated client" or FML-handshake
+                // mismatch — kick with a clear message instead.
+                logger.info("No matching modded group for {} client {} (protocol {}, {} mods) — rejecting connection",
                     connType, player.getUsername(), protocol, clientMods.size());
+                event.setInitialServer(null);
+                player.disconnect(buildModdedNoMatchKick(connType, protocol));
+                return;
             }
 
             Optional<RegisteredServer> lobby = findLobby(server);
@@ -559,6 +565,27 @@ public class NimbusBridgePlugin {
                     Component.text("No lobby server available. Please try again later.", NamedTextColor.RED)
                 );
             }
+        }
+
+        /**
+         * Builds the kick component shown to modded clients with no matching server.
+         * Lists the modded groups available, so the player understands what version
+         * + modloader they actually need to install.
+         */
+        private Component buildModdedNoMatchKick(String connType, int protocol) {
+            String available;
+            if (moddedGroups.isEmpty()) {
+                available = "no modded servers are configured on this network.";
+            } else {
+                available = "available modded servers: " + moddedGroups.stream()
+                    .map(g -> g.name() + " (" + g.software() + " MC " + g.version() + ")")
+                    .collect(Collectors.joining(", "));
+            }
+            return Component.text()
+                .append(Component.text("No compatible modded server for your client.\n", NamedTextColor.RED))
+                .append(Component.text("Your client: " + connType + " (protocol " + protocol + ")\n", NamedTextColor.GRAY))
+                .append(Component.text(available, NamedTextColor.GRAY))
+                .build();
         }
 
         /**
