@@ -104,6 +104,11 @@ internal class ServerPackInstaller {
         entries: List<java.util.zip.ZipEntry>,
         entryNames: List<String>
     ): Triple<ServerSoftware, String, String> {
+        // 1. Prefer ServerPackCreator manifest.json — authoritative when present.
+        //    Format: { "minecraftVersion": "1.21.1", "modloader": "NeoForge",
+        //              "modloaderVersion": "21.1.230", "serverPackCreatorVersion": ... }
+        detectFromManifestJson(zip, entries)?.let { return it }
+
         val neoforgeInstaller = entryNames.firstOrNull { it.matches(Regex("""neoforge-[\d.]+-installer\.jar""")) }
         if (neoforgeInstaller != null) {
             val nfVersion = Regex("""neoforge-([\d.]+)-installer\.jar""").find(neoforgeInstaller)?.groupValues?.get(1) ?: ""
@@ -145,6 +150,40 @@ internal class ServerPackInstaller {
         }
 
         return Triple(ServerSoftware.CUSTOM, "", mcVer)
+    }
+
+    /**
+     * Reads a ServerPackCreator-generated manifest.json from the ZIP root.
+     * Returns null when no manifest exists or its fields can't be parsed.
+     * Authoritative when present — the pack author or ServerPackCreator wrote it
+     * directly, so it overrides JAR-filename / script heuristics.
+     */
+    private fun detectFromManifestJson(
+        zip: ZipFile,
+        entries: List<java.util.zip.ZipEntry>,
+    ): Triple<ServerSoftware, String, String>? {
+        val manifestEntry = entries.firstOrNull { it.name == "manifest.json" } ?: return null
+        return try {
+            val content = zip.getInputStream(manifestEntry).bufferedReader().readText()
+            val mcMatch = Regex(""""minecraftVersion"\s*:\s*"([^"]+)"""").find(content) ?: return null
+            val loaderMatch = Regex(""""modloader"\s*:\s*"([^"]+)"""", RegexOption.IGNORE_CASE).find(content)
+            val versionMatch = Regex(""""modloaderVersion"\s*:\s*"([^"]+)"""").find(content)
+
+            val mcVer = mcMatch.groupValues[1]
+            val loaderName = loaderMatch?.groupValues?.get(1)?.lowercase() ?: ""
+            val loaderVer = versionMatch?.groupValues?.get(1) ?: ""
+
+            val software = when {
+                loaderName.contains("neoforge") -> ServerSoftware.NEOFORGE
+                loaderName.contains("forge") -> ServerSoftware.FORGE
+                loaderName.contains("fabric") -> ServerSoftware.FABRIC
+                else -> return null  // unknown loader → let heuristics try
+            }
+            Triple(software, loaderVer, mcVer)
+        } catch (e: Exception) {
+            logger.warn("Could not parse manifest.json: {}", e.message)
+            null
+        }
     }
 
     private fun detectMcVersionFromNeoForge(nfVersion: String): String? {
