@@ -260,39 +260,88 @@ export default function GroupsPage() {
     if (!importGroupName) setImportGroupName(name);
   }
 
+  async function waitForGroupAppears(
+    name: string,
+    timeoutMs = 120_000,
+    intervalMs = 4_000,
+  ): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        const res = await apiFetch<{ groups: Array<{ name: string }> }>(
+          "/api/groups",
+          { silent: true },
+        );
+        if (res.groups.some((g) => g.name === name)) return true;
+      } catch {
+        // Ignore transient errors; keep polling.
+      }
+      await new Promise((r) => setTimeout(r, intervalMs));
+    }
+    return false;
+  }
+
   async function importModpack() {
     if (!importGroupName.trim()) return;
     setImporting(true);
     setImportProgress("Importing...");
     setImportPercent(-1);
+    const groupName = importGroupName.trim();
     try {
       if (importMode === "upload" && importFile) {
         setImportProgress(`Uploading ${importFile.name}…`);
         setImportPercent(0);
         const params = new URLSearchParams({
-          groupName: importGroupName.trim(),
+          groupName,
           type: importType,
           memory: importMemory,
           minInstances: String(importMinInstances),
           maxInstances: String(importMaxInstances),
           fileName: importFile.name,
         });
-        const result = await apiUpload<ModpackImportResponse>(
-          `/api/modpacks/upload?${params.toString()}`,
-          importFile,
-          (uploaded, total) => {
-            const pct = Math.round((uploaded / total) * 100);
-            setImportPercent(pct);
-            setImportProgress(
-              pct < 100
-                ? `Uploading ${importFile.name}… ${pct}%`
-                : `Installing on controller…`
+        let result: ModpackImportResponse;
+        try {
+          result = await apiUpload<ModpackImportResponse>(
+            `/api/modpacks/upload?${params.toString()}`,
+            importFile,
+            (uploaded, total) => {
+              const pct = Math.round((uploaded / total) * 100);
+              setImportPercent(pct);
+              setImportProgress(
+                pct < 100
+                  ? `Uploading ${importFile.name}… ${pct}%`
+                  : `Installing on controller…`
+              );
+              if (pct >= 100) setImportPercent(-1);
+            }
+          );
+        } catch (err) {
+          // Large server packs (1 GB+) take 30–60 s to extract + install
+          // modloader after bytes-upload completes. Idle timeouts between the
+          // browser and the controller can drop the connection before the
+          // final HTTP response, even though the import succeeded. Detect
+          // this and wait for the group to materialise.
+          const msg = err instanceof Error ? err.message : String(err);
+          const looksLikeNetworkDrop =
+            err instanceof TypeError ||
+            /Failed to fetch|NetworkError|disconnected|aborted|ERR_/i.test(msg);
+          if (!looksLikeNetworkDrop) throw err;
+
+          setImportProgress("Connection dropped — waiting for server to finish import…");
+          const appeared = await waitForGroupAppears(groupName);
+          if (!appeared) {
+            throw new Error(
+              "Upload connection dropped and the group did not appear within 2 min. Check the controller logs.",
             );
-            // After upload finishes, server-side install begins (no progress
-            // signal yet) — drop back to indeterminate so the bar animates.
-            if (pct >= 100) setImportPercent(-1);
           }
-        );
+          result = {
+            success: true,
+            message: `Group '${groupName}' imported (response timed out, but group is registered).`,
+            groupName,
+            filesDownloaded: 0,
+            filesFailed: 0,
+          };
+        }
         if (result.filesFailed > 0) {
           toast.warning(`Imported with ${result.filesFailed} failed downloads`);
         } else {

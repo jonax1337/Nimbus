@@ -312,14 +312,24 @@ fun Route.serviceRoutes(
             call.respond(PlayerCountResponse(name, service.playerCount))
         }
 
-        // GET /api/services/{name}/logs — Get recent log lines (tail-read, not full file)
+        // GET /api/services/{name}/logs?source={app|stdout} — Get recent log lines (tail-read).
+        // - source=app (default): the server software's own log (e.g. logs/latest.log
+        //   for Paper/NeoForge). Best for in-game/server activity.
+        // - source=stdout: raw process stdout/stderr captured by Nimbus. Useful for
+        //   crashes where the server died before flushing its app log (e.g. an
+        //   unhandled JVM exception during mod loading).
         get("{name}/logs") {
             if (!call.requirePermission("nimbus.dashboard.services.console")) return@get
             val name = call.parameters["name"]!!
             val service = registry.get(name)
                 ?: return@get call.respond(HttpStatusCode.NotFound, apiError("Service '$name' not found", ApiError.SERVICE_NOT_FOUND))
 
-            val logFile = service.workingDirectory.resolve("logs/latest.log").toFile()
+            val source = call.queryParameters["source"]?.lowercase() ?: "app"
+            val logPath = when (source) {
+                "stdout", "raw" -> service.workingDirectory.resolve(dev.nimbuspowered.nimbus.service.ProcessHandle.STDOUT_FILE_NAME)
+                else -> service.workingDirectory.resolve("logs/latest.log")
+            }
+            val logFile = logPath.toFile()
             if (!logFile.exists()) {
                 return@get call.respond(LogsResponse(name, emptyList(), 0))
             }

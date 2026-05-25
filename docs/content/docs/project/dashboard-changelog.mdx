@@ -13,6 +13,24 @@ The Nimbus Web Dashboard is versioned independently of the controller, so its UI
 
 ---
 
+## [0.11.0-beta.3] — 2026-05-25
+
+**Controller compatibility:** `1.1.1`
+
+Bugfix release covering the modpack-upload pipeline (browser ↔ mixed-content proxy ↔ controller) and the API-token login screen. Pairs with controller `1.1.1`, which carries the matching server-side fixes.
+
+### Fixed
+
+- **Chunked upload for dedicated services no longer mis-creates a group.** `apiChunkedUpload` previously hardcoded the finalize step to `/api/modpacks/upload/finalize` regardless of the original path, so dedicated uploads — initiated against `/api/dedicated/modpack/upload` — landed in the group-creation handler and failed with `Invalid group name` because they sent `name`/`port`/`memory`/`proxyEnabled` while the handler expected `groupName`/`type`/`minInstances`/`maxInstances`. The chunked path now detects the target from the original path (`/api/dedicated/...` → `target=dedicated`, otherwise `group`), passes `target` to `POST /api/modpacks/upload/init`, and calls the matching finalize endpoint (`/api/dedicated/modpack/upload/finalize` for dedicated).
+- **Large modpack uploads no longer surface a spurious error after a connection drop.** For 1 GB+ server packs the controller takes 30–60 s to extract and run the modloader installer after the byte stream completes, and intermediate proxies often drop the idle HTTPS connection in that window. Both the Dedicated and Groups import dialogs now detect the network-drop shape of the error and poll `/api/dedicated` or `/api/groups` for up to 2 minutes for the new service/group to appear, then show success — instead of showing "Failed to fetch" while the import is still finishing server-side.
+- **API-token login works against an HTTP-only controller from an HTTPS dashboard.** The login form's `controllerFetch` puts the bearer in the standard `Authorization` header, but the dashboard's `/api/proxy/[...path]/route.ts` was only reading `X-Nimbus-Token` and silently discarded the inbound `Authorization`. The proxy now passes the inbound `Authorization` through as a fallback when no `X-Nimbus-Token` is set, so the API-token login screen reaches the controller correctly.
+
+### Notes
+
+- The chunked-upload routing fix is split between the dashboard and the controller (new `target` parameter + new dedicated finalize endpoint). Running an older controller (1.1.0 or earlier) with this dashboard means single-shot dedicated uploads still work, but the proxy-mode chunked path will fail on the finalize step until the controller is upgraded to 1.1.1.
+
+---
+
 ## [1.0.0-stable.1] — 2026-04-25
 
 **Controller compatibility:** `1.0.0`

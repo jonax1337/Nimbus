@@ -20,6 +20,7 @@ async function proxyRequest(
 ) {
   const controllerUrl = request.headers.get(HEADER_CONTROLLER_URL);
   const controllerToken = request.headers.get(HEADER_CONTROLLER_TOKEN);
+  const inboundAuth = request.headers.get("authorization");
 
   if (!controllerUrl) {
     return Response.json(
@@ -36,6 +37,10 @@ async function proxyRequest(
   const headers = new Headers();
   if (controllerToken) {
     headers.set("Authorization", `Bearer ${controllerToken}`);
+  } else if (inboundAuth) {
+    // Login flow uses controllerFetch which puts the token in Authorization
+    // before the X-Nimbus-Token convention is established. Pass it through.
+    headers.set("Authorization", inboundAuth);
   }
 
   const contentType = request.headers.get("content-type");

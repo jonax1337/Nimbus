@@ -99,7 +99,7 @@ Other:
     - `useApiResource` is the canonical data hook; no bare `useEffect` + `fetch` in pages. Mutations go through `apiFetch`, which auto-surfaces 4xx/5xx as toasts (opt-out with `{ silent: true }` for user-initiated flows that render their own errors).
     - Severity colors use CSS variables (`--severity-ok`, `--severity-warn`, `--severity-err`, `--severity-info`). Do not reintroduce hardcoded `emerald-*` / `amber-*` / `destructive` tailwind classes in status UI.
     - Polling intervals are standardized as `POLL.fast` (3s) / `POLL.normal` (5s) / `POLL.slow` (30s) and pause while the tab is hidden.
-    - Dashboard version lives in `dashboard/package.json` (currently `0.11.0-beta.1`), is injected at build via `next.config.ts`, exposed through `dashboard/src/lib/version.ts`, and the sidebar renders a Beta/Alpha badge reflecting the channel. Dashboard version is independent of the controller patch cadence.
+    - Dashboard version lives in `dashboard/package.json` (currently `0.11.0-beta.3`), is injected at build via `next.config.ts`, exposed through `dashboard/src/lib/version.ts`, and the sidebar renders a Beta/Alpha badge reflecting the channel. Dashboard version is independent of the controller patch cadence.
 
 Gradle project names remain unchanged (`:nimbus-sdk`, `:nimbus-module-perms`, etc.) via `projectDir` mappings in `settings.gradle.kts`.
 

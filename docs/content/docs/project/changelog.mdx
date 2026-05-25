@@ -17,6 +17,29 @@ All notable changes to this project are documented in this file. The format is b
 
 ---
 
+## [1.1.1] - 2026-05-25
+
+Bugfix release focused on the modpack-upload pipeline (Dashboard → Controller) and post-mortem crash diagnostics. No new features; safe drop-in upgrade from 1.1.0.
+
+### Fixed
+
+- **Chunked-upload routing for dedicated services.** When the Dashboard runs over HTTPS and the controller over plain HTTP (the standard self-hosted topology), uploads were routed through the dashboard's mixed-content proxy via `apiChunkedUpload`. That code path hardcoded the finalize step to `/api/modpacks/upload/finalize` regardless of the original target, so dedicated-service uploads were mis-routed to the group-creation endpoint, which failed with `Invalid group name` because the params didn't match (`name`/`port`/`memory`/`proxyEnabled` vs. expected `groupName`/`type`/`minInstances`/`maxInstances`). The chunked-upload state now carries a `target` field (`group` or `dedicated`), `POST /api/modpacks/upload/init?target=…` accepts and validates it, and a new `POST /api/dedicated/modpack/upload/finalize` endpoint handles dedicated finalization with the correct params. The original `/api/modpacks/upload/finalize` rejects mismatched targets with a 400 instead of mis-creating.
+- **Modpack uploads survive connection drops after the bytes phase.** Server-side modpack import for a 1 GB+ server pack takes 30–60 s after the byte stream completes (extract + run the NeoForge/Forge installer + write the TOML), and intermediate proxies / NAT idle timeouts often kill the HTTP connection in that window. The import succeeded server-side, but the Dashboard surfaced a generic `Failed to fetch` error and the user assumed the upload had broken. The Dashboard now detects network-shaped errors after upload and polls `/api/dedicated` (dedicated upload) or `/api/groups` (group upload) for up to 2 min for the service/group to materialise, then surfaces success.
+- **Orphan `.modpack-uploads/` files no longer accumulate.** Aborted single-shot uploads and dropped chunked streams left `<uuid>-<filename>` leftovers behind because the cleanup-on-failure path only ran when the request handler reached its `catch` block — connection drops in the middle of the stream bypassed it. `POST /api/modpacks/upload/init` now scans the upload directory and deletes any file older than 1 h that is not referenced by an active chunked-upload state.
+- **Dashboard login screen accepts API tokens through the mixed-content proxy.** `controllerFetch` (used during the login flow before persistent credentials exist) sets the bearer in the standard `Authorization` header, but the dashboard's `/api/proxy/[...path]/route.ts` only read `X-Nimbus-Token` and silently dropped any inbound `Authorization`. The proxy now uses `X-Nimbus-Token` when present and falls back to the inbound `Authorization` header, so the API-token login screen works against an HTTP-only controller from an HTTPS-served dashboard.
+
+### Added
+
+- **Persistent raw process stdout/stderr per service.** `ProcessHandle` now writes the process's combined stdout/stderr (`redirectErrorStream(true)`) to `<workDir>/nimbus-stdout.log`, truncated on each (re)start. Without this, JVM-level exceptions written directly to `System.err` — like Forge/NeoForge mod-loading errors that crash the process before log4j's `asynclogger` flushes — left no on-disk trace and the only visible logs were the 4–5 INFO lines from before the crash. The new file captures the actual Java stack trace.
+- **`GET /api/services/{name}/logs?source={app|stdout}`.** The existing logs endpoint defaults to `source=app` (the server software's own `logs/latest.log`) for backwards compatibility. `source=stdout` reads the new `nimbus-stdout.log` for post-mortem inspection of crash output that never made it into the application log.
+
+### Notes
+
+- API additions only; no breaking changes. The `target` query param on `/api/modpacks/upload/init` defaults to `"group"`, the `source` query param on `/api/services/{name}/logs` defaults to `"app"`, so existing clients keep working unchanged.
+- Compatible Dashboard release: `0.11.0-beta.3`. The fixes for chunked uploads and login require matching versions on both ends — older dashboards continue to work against 1.1.1 controllers but won't see the Dedicated chunked-upload fix until they upgrade.
+
+---
+
 ## [1.0.0] - 2026-04-24
 
 First stable release. No new features — this version exists to declare that the core engine, module framework, REST API, cluster protocol, and all first-party modules are production-ready and covered by SemVer stability guarantees going forward.

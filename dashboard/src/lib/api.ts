@@ -297,9 +297,14 @@ const CHUNK_SIZE = 4 * 1024 * 1024; // 4 MB — safe for Vercel's body limit
 
 /**
  * Chunked upload through the server-side proxy.
- * 1. POST /api/modpacks/upload/init → get uploadId
+ * 1. POST /api/modpacks/upload/init?target=group|dedicated → get uploadId
  * 2. POST /api/modpacks/upload/chunk (sequential, 4MB each) → append on server
- * 3. POST /api/modpacks/upload/finalize → trigger import
+ * 3. POST {finalize endpoint matching target} → trigger import
+ *
+ * The init/chunk endpoints live under /api/modpacks/ regardless of target;
+ * the finalize endpoint differs (group → /api/modpacks/upload/finalize,
+ * dedicated → /api/dedicated/modpack/upload/finalize). The original path tells
+ * us which finalize to call.
  *
  * File.slice() is zero-copy — no RAM usage on the client.
  */
@@ -311,12 +316,25 @@ async function apiChunkedUpload<T = unknown>(
   const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
   const fileName = file instanceof File ? file.name : "upload.zip";
 
-  // Extract query params from the original path (e.g. groupName, type, memory...)
+  // Detect upload target from the original path. Dedicated single-shot uploads
+  // hit /api/dedicated/modpack/upload, group uploads hit /api/modpacks/upload.
+  const isDedicated = path.startsWith("/api/dedicated/modpack/upload");
+  const target = isDedicated ? "dedicated" : "group";
+  const finalizePath = isDedicated
+    ? "/api/dedicated/modpack/upload/finalize"
+    : "/api/modpacks/upload/finalize";
+
+  // Extract query params from the original path (e.g. groupName/type/memory
+  // for groups, name/port/memory/proxyEnabled for dedicated).
   const [, queryString] = path.split("?");
   const originalParams = new URLSearchParams(queryString || "");
 
   // Step 1: Initialize chunked upload
-  const initParams = new URLSearchParams({ fileName, totalChunks: String(totalChunks) });
+  const initParams = new URLSearchParams({
+    fileName,
+    totalChunks: String(totalChunks),
+    target,
+  });
   const init = await apiFetch<{ uploadId: string; totalChunks: number }>(
     `/api/modpacks/upload/init?${initParams.toString()}`,
     { method: "POST" }
@@ -356,10 +374,11 @@ async function apiChunkedUpload<T = unknown>(
     onProgress?.(end, file.size);
   }
 
-  // Step 3: Finalize — pass original params (groupName, type, etc.)
+  // Step 3: Finalize — pass original params (groupName/type for group,
+  // name/port/memory/proxyEnabled for dedicated). Server validates target match.
   originalParams.set("uploadId", init.uploadId);
   return apiFetch<T>(
-    `/api/modpacks/upload/finalize?${originalParams.toString()}`,
+    `${finalizePath}?${originalParams.toString()}`,
     { method: "POST" }
   );
 }

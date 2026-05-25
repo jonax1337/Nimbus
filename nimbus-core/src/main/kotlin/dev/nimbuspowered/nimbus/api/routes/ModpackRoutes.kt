@@ -41,15 +41,16 @@ data class ChunkedUploadStatus(
 /**
  * Tracks active chunked uploads. Entries are cleaned up on finalize or after timeout.
  */
-private data class ChunkedUploadState(
+internal data class ChunkedUploadState(
     val uploadId: String,
     val filePath: Path,
     val totalChunks: Int,
+    val target: String = "group",   // "group" or "dedicated"
     val receivedChunks: MutableSet<Int> = mutableSetOf(),
     val createdAt: Long = System.currentTimeMillis()
 )
 
-private val chunkedUploads = ConcurrentHashMap<String, ChunkedUploadState>()
+internal val chunkedUploads = ConcurrentHashMap<String, ChunkedUploadState>()
 
 /** Sanitize a user-provided file name to prevent path traversal (C3 fix). */
 private fun sanitizeFileName(raw: String): String? {
@@ -363,9 +364,13 @@ fun Route.modpackRoutes(
             val rawFileName = call.request.queryParameters["fileName"] ?: "upload.zip"
             val totalChunks = call.request.queryParameters["totalChunks"]?.toIntOrNull()
                 ?: return@post call.respond(HttpStatusCode.BadRequest, apiError("Missing totalChunks parameter", ApiError.VALIDATION_FAILED))
+            val target = (call.request.queryParameters["target"] ?: "group").lowercase()
 
             if (totalChunks < 1 || totalChunks > 100_000) {
                 return@post call.respond(HttpStatusCode.BadRequest, apiError("Invalid totalChunks value", ApiError.VALIDATION_FAILED))
+            }
+            if (target !in setOf("group", "dedicated")) {
+                return@post call.respond(HttpStatusCode.BadRequest, apiError("Invalid target '$target' (expected 'group' or 'dedicated')", ApiError.VALIDATION_FAILED))
             }
 
             // C3 fix: sanitize fileName to prevent path traversal
@@ -388,14 +393,13 @@ fun Route.modpackRoutes(
             chunkedUploads[uploadId] = ChunkedUploadState(
                 uploadId = uploadId,
                 filePath = filePath,
-                totalChunks = totalChunks
+                totalChunks = totalChunks,
+                target = target
             )
 
-            // Clean up stale uploads (older than 1 hour)
-            val now = System.currentTimeMillis()
-            chunkedUploads.entries.removeIf { (_, state) ->
-                now - state.createdAt > 3_600_000 && state.uploadId != uploadId
-            }
+            // Clean up stale in-memory entries + orphan files older than 1h (single-shot
+            // uploads or aborted streams leave UUID-prefixed leftovers behind).
+            pruneStaleUploads(uploadDir, uploadId)
 
             call.respond(ChunkedUploadInit(uploadId = uploadId, totalChunks = totalChunks))
         }
@@ -448,6 +452,8 @@ fun Route.modpackRoutes(
 
         // POST /api/modpacks/upload/finalize?uploadId=X&groupName=X&type=X&memory=X&...
         // Triggers the same import logic as the single-shot upload endpoint.
+        // Note: only handles target="group" uploads. Dedicated chunked uploads
+        // go to /api/dedicated/modpack/upload/finalize and reuse `chunkedUploads`.
         post("upload/finalize") {
             val uploadId = call.request.queryParameters["uploadId"] ?: ""
             val groupName = call.request.queryParameters["groupName"] ?: ""
@@ -458,6 +464,14 @@ fun Route.modpackRoutes(
 
             val state = chunkedUploads.remove(uploadId)
                 ?: return@post call.respond(HttpStatusCode.NotFound, apiError("Upload not found or expired", ApiError.CHUNKED_UPLOAD_NOT_FOUND))
+
+            if (state.target != "group") {
+                // Caller initialised this upload with target=dedicated; route them to
+                // the correct finalize endpoint instead of mis-creating a group.
+                Files.deleteIfExists(state.filePath)
+                return@post call.respond(HttpStatusCode.BadRequest,
+                    apiError("Upload was initialised with target='${state.target}'. Use /api/dedicated/modpack/upload/finalize instead.", ApiError.VALIDATION_FAILED))
+            }
 
             if (state.receivedChunks.size != state.totalChunks) {
                 Files.deleteIfExists(state.filePath)
@@ -532,6 +546,37 @@ fun Route.modpackRoutes(
                 call.respond(HttpStatusCode.BadRequest, apiError("Uploaded file is not a valid server pack ZIP or .mrpack", ApiError.MODPACK_INVALID))
             }
         }
+    }
+}
+
+/**
+ * Cleans up the `.modpack-uploads/` directory: removes in-memory chunked-upload
+ * state entries older than 1h, plus any orphan files on disk older than 1h that
+ * are NOT referenced by an active state entry. Orphans accumulate when uploads
+ * are aborted mid-stream (the cleanup-on-failure path leaves UUID-prefixed
+ * leftovers behind on connection drops).
+ */
+private fun pruneStaleUploads(uploadDir: Path, excludeUploadId: String) {
+    val now = System.currentTimeMillis()
+    val maxAgeMs = 3_600_000L  // 1 hour
+
+    chunkedUploads.entries.removeIf { (_, state) ->
+        val stale = now - state.createdAt > maxAgeMs && state.uploadId != excludeUploadId
+        if (stale) Files.deleteIfExists(state.filePath)
+        stale
+    }
+
+    val activePaths = chunkedUploads.values.map { it.filePath.toAbsolutePath() }.toSet()
+    try {
+        Files.list(uploadDir).use { stream ->
+            stream.forEach { entry ->
+                if (entry.toAbsolutePath() in activePaths) return@forEach
+                val ageMs = now - Files.getLastModifiedTime(entry).toMillis()
+                if (ageMs > maxAgeMs) Files.deleteIfExists(entry)
+            }
+        }
+    } catch (_: Exception) {
+        // Best-effort cleanup; surface as logger.warn if desired but never block init.
     }
 }
 

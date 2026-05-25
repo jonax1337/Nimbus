@@ -387,28 +387,86 @@ export default function DedicatedPage() {
     if (!importServiceName) setImportServiceName(name);
   }
 
+  /**
+   * Poll the dedicated list until `name` shows up, or give up after `timeoutMs`.
+   * Used as a recovery path when an upload connection drops *after* all bytes
+   * were streamed but before the server flushed its response — the import is
+   * still running server-side and the service eventually materialises.
+   */
+  async function waitForDedicatedAppears(
+    name: string,
+    timeoutMs = 120_000,
+    intervalMs = 4_000,
+  ): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        const res = await apiFetch<{ services: Array<{ name: string }> }>(
+          "/api/dedicated",
+          { silent: true },
+        );
+        if (res.services.some((s) => s.name === name)) return true;
+      } catch {
+        // Ignore transient errors; keep polling.
+      }
+      await new Promise((r) => setTimeout(r, intervalMs));
+    }
+    return false;
+  }
+
   async function importModpack() {
     if (!importServiceName.trim()) return;
     setImporting(true);
     setImportProgress("Importing...");
+    const serviceName = importServiceName.trim();
     try {
       if (importMode === "upload" && importFile) {
         setImportProgress(`Uploading ${importFile.name}...`);
         const params = new URLSearchParams({
-          name: importServiceName.trim(),
+          name: serviceName,
           port: String(importPort),
           memory: importMemory,
           proxyEnabled: String(importProxyEnabled),
           fileName: importFile.name,
         });
-        const result = await apiUpload<ModpackImportResponse>(
-          `/api/dedicated/modpack/upload?${params.toString()}`,
-          importFile,
-          (uploaded, total) => {
-            const pct = Math.round((uploaded / total) * 100);
-            setImportProgress(`Uploading ${importFile.name}... ${pct}%`);
+        let result: ModpackImportResponse;
+        try {
+          result = await apiUpload<ModpackImportResponse>(
+            `/api/dedicated/modpack/upload?${params.toString()}`,
+            importFile,
+            (uploaded, total) => {
+              const pct = Math.round((uploaded / total) * 100);
+              setImportProgress(`Uploading ${importFile.name}... ${pct}%`);
+            }
+          );
+        } catch (err) {
+          // The controller often takes 30–60 s to extract a 1+ GB server pack
+          // and run the modloader installer after receiving the bytes. Idle
+          // timeouts in proxies between the browser and the controller can cut
+          // the connection before the final HTTP response arrives, even though
+          // the import succeeds server-side. Detect that case and wait for the
+          // service to materialise instead of surfacing a spurious error.
+          const msg = err instanceof Error ? err.message : String(err);
+          const looksLikeNetworkDrop =
+            err instanceof TypeError ||
+            /Failed to fetch|NetworkError|disconnected|aborted|ERR_/i.test(msg);
+          if (!looksLikeNetworkDrop) throw err;
+
+          setImportProgress("Connection dropped — waiting for server to finish import…");
+          const appeared = await waitForDedicatedAppears(serviceName);
+          if (!appeared) {
+            throw new Error(
+              "Upload connection dropped and the service did not appear within 2 min. Check the controller logs.",
+            );
           }
-        );
+          result = {
+            success: true,
+            message: `Dedicated service '${serviceName}' imported (response timed out, but service is registered).`,
+            groupName: serviceName,
+            filesDownloaded: 0,
+            filesFailed: 0,
+          };
+        }
         if (result.filesFailed > 0) {
           toast.warning(`Imported with ${result.filesFailed} failed downloads`);
         } else {
@@ -420,7 +478,7 @@ export default function DedicatedPage() {
           method: "POST",
           body: JSON.stringify({
             source: importSource.trim(),
-            name: importServiceName.trim(),
+            name: serviceName,
             port: importPort,
             memory: importMemory,
             proxyEnabled: importProxyEnabled,

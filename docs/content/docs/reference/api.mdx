@@ -193,7 +193,7 @@ Backends (using `:nimbus-sdk`) call these:
 | `GET` | `/api/services/{name}/state` | Current custom state. |
 | `PUT` | `/api/services/{name}/health` | `{ "tps": 19.8 }` — memory fields in the request are accepted but ignored (the controller reads `/proc`). |
 | `PUT` | `/api/services/{name}/players` | `{ "playerCount": 17 }` |
-| `GET` | `/api/services/{name}/logs?lines=100` | Tails `logs/latest.log` (lines clamped 1..1000). |
+| `GET` | `/api/services/{name}/logs?lines=100&source=app` | Tails the service log (lines clamped 1..1000). `source=app` (default) reads the server software's own `logs/latest.log`. `source=stdout` reads the raw process stdout/stderr captured by Nimbus at `nimbus-stdout.log` — useful for crashes where the server died before flushing its application log (e.g. an unhandled JVM exception during mod loading). |
 | `POST` | `/api/services/{name}/message` | `{ "from": "Lobby-1", "channel": "queue", "data": { ... } }`. Emits a `SERVICE_MESSAGE` event. The special target `controller` is virtual (no service lookup). |
 
 ---
@@ -472,12 +472,17 @@ Agents pull and push the controller's canonical copy of a service's working dire
 | `POST` | `/api/modpacks/resolve` | Look up a pack by URL or ID. |
 | `POST` | `/api/modpacks/import` | Import by manifest (CurseForge/Modrinth). |
 | `POST` | `/api/modpacks/upload` | Single-shot upload of a server pack (raw body, `filename` query param). |
-| `POST` | `/api/modpacks/upload/init` | Start a chunked upload — returns an upload ID. |
+| `POST` | `/api/modpacks/upload/init?target={group\|dedicated}` | Start a chunked upload — returns an upload ID. `target` defaults to `group`; set `target=dedicated` to finalize via the dedicated endpoint below. Mismatched targets at finalize time produce a 400. |
 | `POST` | `/api/modpacks/upload/chunk` | Append a chunk. |
-| `POST` | `/api/modpacks/upload/finalize` | Commit the assembled pack. |
+| `POST` | `/api/modpacks/upload/finalize` | Commit a `target=group` upload (params: `groupName`, `type`, `memory`, `minInstances`, `maxInstances`, `uploadId`). |
+| `POST` | `/api/dedicated/modpack/upload/finalize` | Commit a `target=dedicated` upload (params: `name`, `port`, `memory`, `proxyEnabled`, `uploadId`). |
 
 <Callout type="info">
-  The chunked flow exists because browsers struggle to stream single large multipart bodies through the dashboard's auth layer. Native tools can use the single-shot `POST /api/modpacks/upload` instead.
+  The chunked flow exists because browsers struggle to stream single large multipart bodies through the dashboard's auth layer. Native tools can use the single-shot `POST /api/modpacks/upload` (groups) or `POST /api/dedicated/modpack/upload` (dedicated) instead.
+</Callout>
+
+<Callout type="info">
+  Modpack imports of 1 GB+ server packs take 30–60 s of server-side work after the byte stream completes (extract + run the modloader installer + write the TOML). Intermediate proxies often drop the idle HTTPS connection in that window, so callers should treat a network-shape error after upload as "import may still be running" and poll `/api/groups` or `/api/dedicated` for up to 2 minutes for the new entry to appear, before reporting failure.
 </Callout>
 
 ---

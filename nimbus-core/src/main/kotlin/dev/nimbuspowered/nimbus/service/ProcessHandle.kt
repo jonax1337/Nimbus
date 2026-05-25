@@ -10,7 +10,9 @@ import kotlinx.coroutines.future.await
 import org.slf4j.LoggerFactory
 import java.io.BufferedWriter
 import java.io.OutputStreamWriter
+import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardOpenOption
 import kotlin.time.Duration
 
 class ProcessHandle : ServiceHandle {
@@ -46,6 +48,26 @@ class ProcessHandle : ServiceHandle {
         process = pb.start()
         stdinWriter = BufferedWriter(OutputStreamWriter(process!!.outputStream))
 
+        // Persist raw stdout/stderr (with redirectErrorStream=true these are
+        // already merged) so JVM-level exceptions written directly to stderr
+        // — like Forge/NeoForge mod-loading errors that bypass log4j's
+        // asynclogger and never reach logs/latest.log — can be inspected
+        // post-mortem. Without this, crashing services leave no on-disk
+        // trace of the actual failure.
+        val rawLogPath = workDir.resolve(STDOUT_FILE_NAME)
+        val rawLogWriter = try {
+            runCatching { Files.createDirectories(workDir) }
+            Files.newBufferedWriter(
+                rawLogPath,
+                StandardOpenOption.CREATE,
+                StandardOpenOption.TRUNCATE_EXISTING,
+                StandardOpenOption.WRITE,
+            )
+        } catch (e: Exception) {
+            logger.warn("Could not open {} for raw stdout capture: {}", rawLogPath, e.message)
+            null
+        }
+
         scope.launch {
             try {
                 process!!.inputStream.bufferedReader().useLines { lines ->
@@ -54,11 +76,22 @@ class ProcessHandle : ServiceHandle {
                             if (tailBuffer.size >= TAIL_CAPACITY) tailBuffer.removeFirst()
                             tailBuffer.addLast(line)
                         }
+                        rawLogWriter?.let { writer ->
+                            try {
+                                writer.write(line)
+                                writer.newLine()
+                                writer.flush()
+                            } catch (_: Exception) {
+                                // Disk full / closed — keep streaming in-memory.
+                            }
+                        }
                         _stdoutLines.emit(line)
                     }
                 }
             } catch (e: Exception) {
                 logger.warn("stdout reader terminated: {}", e.message)
+            } finally {
+                rawLogWriter?.runCatching { close() }
             }
         }
     }
@@ -141,6 +174,8 @@ class ProcessHandle : ServiceHandle {
 
     companion object {
         private const val TAIL_CAPACITY = 50
+        /** File name (inside each service's workDir) that captures raw process stdout/stderr. */
+        const val STDOUT_FILE_NAME = "nimbus-stdout.log"
         private val adoptLogger = LoggerFactory.getLogger(ProcessHandle::class.java)
 
         /**
